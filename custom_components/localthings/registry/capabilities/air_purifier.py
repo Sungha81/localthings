@@ -39,23 +39,33 @@ set to Auto/Sleep/Low/Medium/High):
                             automatic side effect of sleep mode, e.g. a
                             display-dimming level, but that's still a guess).
 
-/airflow/0's `speed` is now a real fan-speed control (issue #56 follow-up).
-The first round of five dumps above wasn't conclusive -- it read 0 for both
+/airflow/0's `speed` is a real fan-speed control (issue #56 follow-up). The
+first round of five dumps above wasn't conclusive -- it read 0 for both
 Auto *and* High, and 3 for Low/Medium *and* Sleep, likely because all five
 were captured within about a minute of each other, faster than this
-integration's own ~30s poll cycle could settle each change. A second round,
-captured 60-90s apart per setting on two independent units, confirmed a
-clean monotonic mapping instead: Auto=0, Sleep=1, Low=2, Medium=3, High=4.
-AIRFLOW_GENERIC below builds an ordered-speed fan off that confirmed 0-4
-range -- same SET_SPEED shape as range_hood.py's fan, mapping HA's
-percentage steps straight onto the raw code, no named-preset table needed
-(unlike the TP1X family's FAN, which exposes real named modes because its
-board actually reports a supportedModes list to hang names off of).
+integration's own ~30s poll cycle could settle each change. A later,
+properly-spaced capture (power confirmed on, sensor values actively
+changing, one setting changed at a time, several minutes apart) resolved a
+clean mapping instead -- and additionally surfaced a sixth value this
+board's app exposes that the original round never tried:
 
-/airflow/vs/0's vendor `speedLevel` is NOT used for the same purpose -- it
-was unreliable on both units in that second round (Low/Medium collided on
-one unit, stuck at 0 throughout on the other), so AIRFLOW_VS_FALLBACK below
-stays a plain read-only diagnostic even after this change.
+    0 = Auto, 1 = Sleep, 2 = Low, 3 = Medium, 4 = High, 6 = WindFree
+    (5 does not occur -- this model has no Turbo mode)
+
+This is NOT a linear intensity scale -- WindFree (6) is a diffuse
+gentle-air mode, not "stronger than High" (4) -- so AIRFLOW_GENERIC below
+exposes it as a named preset (fan.py's LocalThingsAirflowFan) rather than
+an ordered percentage. LEVEL_TO_PRESET is a hardcoded table, not read live
+from the device, because this href/field has no accompanying supportedModes
+(or similarly-shaped) list to hang names off of -- unlike the TP1X/
+A-VTWW-TP2-21 families' FAN/WIND_STRENGTH_FAN below, which do.
+
+/airflow/vs/0's vendor `speedLevel` mirrors the same numeric codes as
+`speed` above on every dump seen (matching values on both hrefs at High and
+at WindFree), but is NOT used as the write target -- AIRFLOW_VS_FALLBACK
+stays a read-only diagnostic since /airflow/0 already has a confirmed,
+reliable write contract and there's no reason to prefer the vendor
+duplicate.
 """
 from ..capability import Capability
 from ..entities import (
@@ -149,25 +159,42 @@ def _power_write(power_href, value):
             {'x.com.samsung.da.power': 'On' if value else 'Off'})
 
 
+# speed/speedLevel <-> named-mode mapping used by AIRFLOW_GENERIC's preset
+# fan below (fan.py's LocalThingsAirflowFan). Confirmed via several
+# per-mode diagnostics dumps, minutes apart, one setting changed at a time:
+#   0=Auto, 1=Sleep, 2=Low, 3=Medium, 4=High, 6=WindFree
+# (5 does not occur -- this model reports no Turbo mode). NOT a linear
+# intensity scale -- see module docstring for why WindFree (6) isn't
+# "stronger than High" (4) despite the larger code.
+LEVEL_TO_PRESET = {
+    0: 'Auto',
+    1: 'Sleep',
+    2: 'Low',
+    3: 'Medium',
+    4: 'High',
+    6: 'WindFree',
+}
+PRESET_TO_LEVEL = {name: level for level, name in LEVEL_TO_PRESET.items()}
+PRESET_MODES = tuple(LEVEL_TO_PRESET.values())
+
+
 def _airflow_fan_write(payload, rep, href=None):
     kind, value, *args = payload
     if kind == 'power':
         return _power_write(args[0] if args else '/power/vs/0', value)
-    if kind == 'speed':
-        return ['airflow', '0'], {'speed': int(value)}
+    if kind == 'preset':
+        if value not in PRESET_TO_LEVEL:
+            return None
+        return ['airflow', '0'], {'speed': PRESET_TO_LEVEL[value]}
     return None
 
 
-# Confirmed via issue #56's second, properly-spaced round of diagnostics
-# (two independent units, 60-90s apart per setting): /airflow/0's `speed` is
-# a clean, monotonic 0-4 code across Auto/Sleep/Low/Medium/High, so it now
-# backs a real ordered-speed fan (fan.py's LocalThingsAirflowFan, same
-# SET_SPEED shape as the range hood's) instead of a read-only sensor --
-# no named-preset table needed, since HA's percentage steps map onto the
-# raw 0-4 code directly, the same way the range hood's numeric levels do.
-# `direction` stays a plain diagnostic: every dump seen (both rounds, both
-# units) reads 'Off' for it regardless of fan setting, so there's nothing
-# confirmed to control there yet.
+# AIRFLOW_GENERIC now backs a named-preset fan (fan.py's
+# LocalThingsAirflowFan) instead of an ordered-percentage one -- see module
+# docstring for the confirmed 0/1/2/3/4/6 -> Auto/Sleep/Low/Medium/High/
+# WindFree mapping this relies on. `direction` stays a plain diagnostic:
+# every dump seen reads 'Off' for it regardless of fan setting, so there's
+# nothing confirmed to control there yet.
 #
 # Keyed 'airflow_fan', not 'fan' -- FAN below (bound to the shared
 # /mode/vs/0 href) also uses 'fan', and BoundEntity's unique_id is built
@@ -187,10 +214,10 @@ AIRFLOW_GENERIC = Capability(
     ),
 )
 
-# Left exactly as a read-only fallback -- speedLevel is NOT the same
-# confirmed-reliable field as /airflow/0's speed above (see module
-# docstring): it collided Low/Medium on one unit and stuck at 0 throughout
-# on the other in the same properly-spaced round.
+# Left exactly as a read-only fallback -- mirrors AIRFLOW_GENERIC's `speed`
+# numerically (see module docstring) but is not the write target; no
+# reason to prefer the vendor duplicate over the confirmed /airflow/0
+# contract.
 AIRFLOW_VS_FALLBACK = Capability(
     href='/airflow/vs/0',
     match_fn=lambda rep, resources: '/airflow/0' not in resources,

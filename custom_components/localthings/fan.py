@@ -2,17 +2,18 @@
 
 Four FanDesc-bound hrefs exist, dispatched by href in async_setup_entry
 below since each needs different HA fan semantics: the range hood's fan
-speed and the older ARTIK051_TVTL air-purifier family's Auto/Sleep/Low/
-Medium/High (issue #56) are both an ordered set of numeric levels
-(SET_SPEED) -- the latter confirmed monotonic in capabilities/
-air_purifier.py's module docstring, with no named-mode list to preserve
-since this board never self-reports one. The TP1X air-purifier family's
-modes (Smart/Max/Mid/WindFree/Sleep, issue #130) and the A-VTWW-TP2-21
-family's /wind/strength/vs/0 modes (issue #151) are both named behaviors
-with no linear order (PRESET_MODE) -- LocalThingsAirPurifierFan handles
-both hrefs, the only difference being whether the label comes straight
-from supportedModes or from a parallel modesName array (see
-_label_for_code)."""
+speed is an ordered set of numeric levels (SET_SPEED). The older
+ARTIK051_TVTL air-purifier family's Auto/Sleep/Low/Medium/High/WindFree
+(issue #56) are named behaviors with no linear order -- WindFree isn't
+"faster" than High -- so LocalThingsAirflowFan exposes them as
+PRESET_MODE, using a hardcoded name<->code table (capabilities/
+air_purifier.py's LEVEL_TO_PRESET) since this href never self-reports a
+supportedModes-style name list. The TP1X air-purifier family's modes
+(Smart/Max/Mid/WindFree/Sleep, issue #130) and the A-VTWW-TP2-21 family's
+/wind/strength/vs/0 modes (issue #151) are also named behaviors
+(PRESET_MODE) -- LocalThingsAirPurifierFan handles both of those hrefs,
+the only difference being whether the label comes straight from
+supportedModes or from a parallel modesName array (see _label_for_code)."""
 
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ from .entity import LocalThingsEntity, _is_included
 from .registry.capabilities.air_purifier import HREF_AIRFLOW
 from .registry.capabilities.air_purifier import HREF_MODE as AIR_PURIFIER_FAN_HREF
 from .registry.capabilities.air_purifier import HREF_WIND_STRENGTH as AIR_PURIFIER_WIND_STRENGTH_HREF
+from .registry.capabilities.air_purifier import LEVEL_TO_PRESET as _AIRFLOW_LEVEL_TO_PRESET
+from .registry.capabilities.air_purifier import PRESET_MODES as _AIRFLOW_PRESET_MODES
 from .registry.entities import FanDesc
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,7 +45,6 @@ POWER_VS_HREF = '/power/vs/0'
 _FAN_SPEED_FIELD = 'x.com.samsung.da.hood.fanSpeed'
 _SUPPORTED_FAN_SPEED_FIELD = 'x.com.samsung.da.hood.supportedFanSpeed'
 _MIN_FAN_SPEED_FIELD = 'x.com.samsung.da.hood.settableMinFanSpeed'
-_MAX_FAN_SPEED_FIELD = 'x.com.samsung.da.hood.settableMaxFanSpeed'
 _OFF_SPEED_CODE = '0'
 
 _MODES_FIELD = 'x.com.samsung.da.modes'
@@ -90,13 +92,11 @@ class LocalThingsRangeHoodFan(LocalThingsEntity, FanEntity):
     """
 
     _enable_turn_on_off_backwards_compatibility = False
-
-    @property
-    def supported_features(self) -> FanEntityFeature:
-        features = FanEntityFeature.TURN_ON | FanEntityFeature.TURN_OFF
-        if self.speed_count > 0:
-            features |= FanEntityFeature.SET_SPEED
-        return features
+    _attr_supported_features = (
+        FanEntityFeature.SET_SPEED
+        | FanEntityFeature.TURN_ON
+        | FanEntityFeature.TURN_OFF
+    )
 
     def __init__(self, coordinator: LocalThingsCoordinator, bound) -> None:
         super().__init__(coordinator, bound)
@@ -122,18 +122,7 @@ class LocalThingsRangeHoodFan(LocalThingsEntity, FanEntity):
 
     def _all_speed_codes(self) -> list[str]:
         rep = self._rep(self._bound.href)
-        supported = rep.get(_SUPPORTED_FAN_SPEED_FIELD)
-        if supported:
-            return [str(value) for value in supported]
-        min_s = rep.get(_MIN_FAN_SPEED_FIELD)
-        max_s = rep.get(_MAX_FAN_SPEED_FIELD)
-        if min_s is not None and max_s is not None:
-            try:
-                mn, mx = int(min_s), int(max_s)
-                return [str(i) for i in range(mn, mx + 1)]
-            except (ValueError, TypeError):
-                pass
-        return []
+        return [str(value) for value in rep.get(_SUPPORTED_FAN_SPEED_FIELD, ())]
 
     def _active_speed_codes(self) -> list[str]:
         codes = self._all_speed_codes()
@@ -148,7 +137,7 @@ class LocalThingsRangeHoodFan(LocalThingsEntity, FanEntity):
 
     def _power_payload(self, enabled: bool) -> tuple[str, bool, str]:
         """Target whichever power resource this hood actually exposes."""
-        resources = self._resources
+        resources = self.coordinator.last_resources
         target = POWER_HREF if POWER_HREF in resources else POWER_VS_HREF
         return 'power', enabled, target
 
@@ -251,7 +240,7 @@ class LocalThingsAirPurifierFan(LocalThingsEntity, FanEntity):
         Writing a hardcoded href here would silently no-op on a board that
         only reports the other one, even though is_on already falls back
         correctly."""
-        resources = self._resources
+        resources = self.coordinator.last_resources
         target = POWER_VS_HREF if POWER_VS_HREF in resources else POWER_HREF
         return 'power', enabled, target
 
@@ -320,25 +309,32 @@ class LocalThingsAirPurifierFan(LocalThingsEntity, FanEntity):
 
 
 _AIRFLOW_SPEED_FIELD = 'speed'
-# Raw `speed` codes, low-to-high -- confirmed monotonic (Auto=0, Sleep=1,
-# Low=2, Medium=3, High=4) via air_purifier.py's module docstring. Ordered
-# as plain strings, same as _all_speed_codes above, so
-# ordered_list_item_to_percentage/percentage_to_ordered_list_item can treat
-# it exactly like the range hood's numeric levels -- no named-preset table
-# needed since this board never reports mode names to hang one off of.
-_AIRFLOW_SPEED_CODES = ('0', '1', '2', '3', '4')
 
 
 class LocalThingsAirflowFan(LocalThingsEntity, FanEntity):
-    """ARTIK051_TVTL-class air purifier fan (issue #56): an ordered numeric
-    speed range, same SET_SPEED shape as LocalThingsRangeHoodFan above."""
+    """ARTIK051_TVTL-class air purifier fan (issue #56): named preset
+    modes (Auto/Sleep/Low/Medium/High/WindFree), not an ordered
+    percentage -- WindFree is a diffuse gentle-air mode, not "stronger"
+    than High, so it can't sit on a linear speed scale (see
+    capabilities/air_purifier.py's LEVEL_TO_PRESET / module docstring for
+    how the mapping was confirmed). Unlike LocalThingsAirPurifierFan
+    above, this href never self-reports a supportedModes-style name list,
+    so the code<->label mapping here is the hardcoded LEVEL_TO_PRESET
+    table rather than something read live off the device.
+
+    Power reads/writes prefer /power/vs/0 over /power/0 -- the opposite
+    of every other fan class in this file -- because this board
+    generation confirmed leads on that href in both directions; see
+    _power_payload below and capabilities/air_purifier_power.py.
+    """
 
     _enable_turn_on_off_backwards_compatibility = False
     _attr_supported_features = (
-        FanEntityFeature.SET_SPEED
+        FanEntityFeature.PRESET_MODE
         | FanEntityFeature.TURN_ON
         | FanEntityFeature.TURN_OFF
     )
+    _attr_preset_modes = list(_AIRFLOW_PRESET_MODES)
 
     def __init__(self, coordinator: LocalThingsCoordinator, bound) -> None:
         super().__init__(coordinator, bound)
@@ -348,56 +344,56 @@ class LocalThingsAirflowFan(LocalThingsEntity, FanEntity):
         return self.coordinator.resource(href) or {}
 
     def _power_payload(self, enabled: bool) -> tuple[str, bool, str]:
-        """Prefer /power/0 like LocalThingsRangeHoodFan above, NOT
-        LocalThingsAirPurifierFan's vs/0-first order -- that order is only
-        harmless for the TP1X board because it never reports /power/0 at
-        all. This family's dumps carry both hrefs, and common.POWER_GENERIC
-        (the power_switch entity) is unconditionally bound to /power/0
-        whenever it's present, so writing here to /power/vs/0 first would
-        leave power_switch and this fan reading/writing two different
-        resources -- disagreeing until the next poll refreshes the other
-        one (the same optimistic-apply lag coordinator.py's own comments
-        warn about)."""
-        resources = self._resources
-        target = POWER_HREF if POWER_HREF in resources else POWER_VS_HREF
+        """Prefer /power/vs/0, NOT /power/0 -- confirmed on this board
+        generation that /power/vs/0 reflects a state change before /power/0
+        does, in both directions (see capabilities/air_purifier_power.py's
+        module docstring). That module's POWER_VS_TVTL is this board's
+        writable source of truth (POWER_GENERIC_TVTL_MIRROR on /power/0 is
+        read-only), so writing/reading here has to target the same href or
+        this entity and the power switch entity would show two different
+        answers until the slower field caught up. This is the opposite
+        priority from LocalThingsRangeHoodFan._power_payload above --
+        deliberately so; that class's board generation was never checked
+        for the same lead/lag behavior, so it keeps preferring /power/0."""
+        resources = self.coordinator.last_resources
+        target = POWER_VS_HREF if POWER_VS_HREF in resources else POWER_HREF
         return 'power', enabled, target
 
     @property
     def is_on(self) -> bool:
-        power = self._rep(POWER_HREF)
-        if 'value' in power:
-            return bool(power.get('value'))
-        return str(self._rep(POWER_VS_HREF).get('x.com.samsung.da.power', '')).lower() == 'on'
+        power = self._rep(POWER_VS_HREF)
+        if 'x.com.samsung.da.power' in power:
+            return str(power.get('x.com.samsung.da.power', '')).lower() == 'on'
+        return bool(self._rep(POWER_HREF).get('value'))
 
     @property
-    def speed_count(self) -> int:
-        return len(_AIRFLOW_SPEED_CODES)
-
-    @property
-    def percentage(self) -> int | None:
-        if not self.is_on:
-            return 0
-        current = str(self._rep(self._bound.href).get(_AIRFLOW_SPEED_FIELD, ''))
-        if current not in _AIRFLOW_SPEED_CODES:
+    def preset_mode(self) -> str | None:
+        rep = self._rep(self._bound.href)
+        code = rep.get(_AIRFLOW_SPEED_FIELD)
+        try:
+            level = int(code)
+        except (TypeError, ValueError):
             return None
-        return ordered_list_item_to_percentage(_AIRFLOW_SPEED_CODES, current)
+        return _AIRFLOW_LEVEL_TO_PRESET.get(level)
 
     async def async_turn_on(
         self, percentage: int | None = None, preset_mode: str | None = None,
         **kwargs,
     ) -> None:
         await self.coordinator.async_send_command(self._bound, self._power_payload(True))
-        if percentage is not None:
-            await self.async_set_percentage(percentage)
+        if preset_mode is not None:
+            await self.async_set_preset_mode(preset_mode)
 
     async def async_turn_off(self, **kwargs) -> None:
         await self.coordinator.async_send_command(self._bound, self._power_payload(False))
 
-    async def async_set_percentage(self, percentage: int) -> None:
-        if percentage <= 0:
-            await self.async_turn_off()
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        if preset_mode not in _AIRFLOW_PRESET_MODES:
+            _LOGGER.warning(
+                "%s: %r is not a valid preset mode (supported: %s)",
+                self.entity_id, preset_mode, _AIRFLOW_PRESET_MODES,
+            )
             return
         if not self.is_on:
             await self.coordinator.async_send_command(self._bound, self._power_payload(True))
-        code = percentage_to_ordered_list_item(_AIRFLOW_SPEED_CODES, percentage)
-        await self.coordinator.async_send_command(self._bound, ('speed', int(code)))
+        await self.coordinator.async_send_command(self._bound, ('preset', preset_mode))

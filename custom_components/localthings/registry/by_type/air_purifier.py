@@ -5,7 +5,13 @@ capabilities/air_purifier.py's module docstring for the per-href
 match_fn discriminators that keep them from colliding):
 
 - ARTIK051_TVTL-class (issue #56). Resolved via the 'TVTL' modelNum board
-  token (see by_type/__init__.py).
+  token (see by_type/__init__.py). Power is bound via
+  capabilities/air_purifier_power.py's board-scoped pair instead of
+  *common.POWER -- confirmed on this board that /power/vs/0 leads /power/0
+  by several seconds in both directions, the opposite of common.py's
+  generic-first default. That module's *_OTHER capabilities keep every
+  other board generation below on common.py's original, unmodified
+  priority; see its docstring for the full reasoning.
 - TP1X_DA-AC-AIR-class (issue #130). Resolved via the 'AIR' board token.
   Adds real fan-mode control plus
   display/HEPA-filter/pet-filter/sound resources the older family never
@@ -16,16 +22,14 @@ match_fn discriminators that keep them from colliding):
   token, added for it. Its fan
   is WIND_STRENGTH_FAN on /wind/strength/vs/0 rather than FAN on
   /mode/vs/0 -- see that capability's comment.
-- AVT-WW-TP1-23-class (issue #190). A next-gen board in the same VTWW
-  lineage, resolved via its own 'AVT' board token since the '-WW-' delimiter
-  falls one letter to the left of 'VTWW's whole-token spelling. Same
-  resource surface as A-VTWW-TP2-21-COMMON above; no new capabilities
-  needed.
 
 Reuses dishwasher.DIAGNOSIS for /diagnosis/vs/0 (identical field/write
 contract).
 """
 from ..capabilities import air_purifier, airconditioner, common, dishwasher, ignored
+from ..capabilities.air_purifier_power import (
+    POWER_GENERIC_OTHER, POWER_GENERIC_TVTL_MIRROR, POWER_VS_OTHER, POWER_VS_TVTL,
+)
 from ._base import DeviceRegistry, _build
 
 REGISTRY = DeviceRegistry(
@@ -33,7 +37,10 @@ REGISTRY = DeviceRegistry(
     capabilities=_build([
         *ignored.IGNORED,
         *common.UNIVERSAL,
-        *common.POWER,
+        POWER_VS_TVTL,
+        POWER_GENERIC_TVTL_MIRROR,
+        POWER_GENERIC_OTHER,
+        POWER_VS_OTHER,
         dishwasher.DIAGNOSIS,
         air_purifier.AIR_QUALITY,
         air_purifier.FILTER,

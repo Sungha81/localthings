@@ -914,7 +914,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # (no-op in observe-primary mode unless this cycle's sweep found a
         # mismatch; _run_subpolls checks the mode/force).
         if self._hot_hrefs or self._warm_hrefs:
-            self._subpoll_task = self.hass.async_create_task(
+            self._subpoll_task = self.hass.async_create_background_task(
                 self._run_subpolls(force=sweep_mismatch), name="localthings_subpoll"
             )
 
